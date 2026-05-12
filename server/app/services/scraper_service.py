@@ -1060,42 +1060,74 @@ def normalize_linkedin_url(url: str) -> str:
     return url
 
 
-def search_linkedin_via_duckduckgo(page, search_term: str, max_results: int, msg_q: queue.Queue) -> list:
-    """Search DuckDuckGo for LinkedIn company pages + personal profiles."""
-    keyword = normalize_term(search_term)
-    # Search for both /company/ and /in/ pages
-    query = f'site:linkedin.com (company OR in) "{keyword}" india'
-    search_url = f"https://duckduckgo.com/html/?q={quote_plus(query)}&kl=in-en"
-
-    msg_q.put(("progress", {"message": f'Discovering LinkedIn for "{keyword}"...', "found": 0, "total": 0}))
-    print(f"[scraper] LI DDG search: {search_url}", flush=True)
-
+def _is_blocked_page(page) -> bool:
+    """Detect captcha / rate-limit / 'unusual traffic' pages from search engines."""
     try:
-        page.goto(search_url, wait_until="domcontentloaded", timeout=30_000)
-        human_pause(2, 4)
-        human_mouse_wander(page)
-    except Exception as e:
-        print(f"[scraper] LI DDG nav error: {e}", flush=True)
-        return []
+        content = page.content().lower()
+    except Exception:
+        return False
+    indicators = [
+        "error-lite@duckduckgo.com",
+        "unusual traffic",
+        "automated queries",
+        "are you a robot",
+        "captcha",
+        "anomaly detected",
+        "please verify you are a human",
+    ]
+    return any(s in content for s in indicators)
 
+
+def _human_type(page, selector: str, text: str):
+    """Type into a search box one character at a time with realistic jitter."""
+    try:
+        el = page.query_selector(selector)
+        if not el:
+            return False
+        el.click()
+        human_pause(0.3, 0.8)
+        for ch in text:
+            page.keyboard.type(ch)
+            import time
+            time.sleep(random.uniform(0.04, 0.18))
+        human_pause(0.5, 1.2)
+        return True
+    except Exception:
+        return False
+
+
+def _extract_linkedin_urls_from_page(page) -> set:
+    """Pull LinkedIn URLs from any search results page (DDG or Bing)."""
     li_urls = set()
+    try:
+        for link in page.query_selector_all('a[href]'):
+            raw = (link.get_attribute("href") or "").strip()
+            # DDG redirect wrapper
+            if "duckduckgo.com/l/" in raw or raw.startswith("/l/"):
+                qs = parse_qs(urlparse(raw).query)
+                raw = unquote(qs.get("uddg", [""])[0])
+            # Bing redirect wrapper (bing.com/ck/a?...&u=<encoded>)
+            if "bing.com/ck/a" in raw:
+                qs = parse_qs(urlparse(raw).query)
+                u = qs.get("u", [""])[0]
+                if u:
+                    raw = unquote(u)
+                    # Bing prefixes encoded URLs with "a1"
+                    if raw.startswith("a1"):
+                        try:
+                            import base64
+                            raw = base64.b64decode(raw[2:] + "===").decode("utf-8", errors="ignore")
+                        except Exception:
+                            pass
+            if "linkedin.com" not in raw:
+                continue
+            raw = normalize_linkedin_url(raw)
+            if is_valid_linkedin_url(raw):
+                li_urls.add(raw)
+    except Exception:
+        pass
 
-    for sel in ["a.result__a", "a.result__url", 'a[href*="linkedin.com"]']:
-        try:
-            for link in page.query_selector_all(sel):
-                raw = (link.get_attribute("href") or "").strip()
-                if "duckduckgo.com/l/" in raw or raw.startswith("/l/"):
-                    qs = parse_qs(urlparse(raw).query)
-                    raw = unquote(qs.get("uddg", [""])[0])
-                if "linkedin.com" not in raw:
-                    continue
-                raw = normalize_linkedin_url(raw)
-                if is_valid_linkedin_url(raw):
-                    li_urls.add(raw)
-        except Exception:
-            continue
-
-    # Regex fallback on raw HTML
+    # Regex fallback over the raw HTML
     try:
         content = page.content()
         for match in re.findall(
@@ -1109,8 +1141,101 @@ def search_linkedin_via_duckduckgo(page, search_term: str, max_results: int, msg
     except Exception:
         pass
 
+    return li_urls
+
+
+def search_linkedin_via_duckduckgo(page, search_term: str, max_results: int, msg_q: queue.Queue) -> list:
+    """
+    Search for LinkedIn pages via DuckDuckGo (with human-like behavior),
+    falling back to Bing if DDG blocks us.
+    """
+    keyword = normalize_term(search_term)
+    msg_q.put(("progress", {"message": f'Discovering LinkedIn for "{keyword}"...', "found": 0, "total": 0}))
+
+    # Simpler query — DDG's parser hates the (company OR in) form.
+    # /company/ + /in/ + /school/ filtering happens downstream.
+    query = f'site:linkedin.com "{keyword}" india'
+
+    li_urls = set()
+    ddg_worked = False
+
+    # ── Try DuckDuckGo HTML endpoint (same approach that works for FB/IG) ──
+    try:
+        ddg_url = f"https://duckduckgo.com/html/?q={quote_plus(query)}&kl=in-en"
+        print(f"[scraper] LI DDG: {ddg_url}", flush=True)
+        page.goto(ddg_url, wait_until="domcontentloaded", timeout=30_000)
+        human_pause(2.5, 4.5)
+        human_mouse_wander(page)
+        human_scroll(page, 500)
+        human_pause(1, 2)
+
+        title = page.title()
+        print(f"[scraper] LI DDG title: '{title}'", flush=True)
+
+        if _is_blocked_page(page):
+            print("[scraper] LI DDG blocked — will try Bing", flush=True)
+        else:
+            li_urls = _extract_linkedin_urls_from_page(page)
+            ddg_worked = len(li_urls) > 0
+    except Exception as e:
+        print(f"[scraper] LI DDG error: {e}", flush=True)
+
+    # ── Fallback: Bing ─────────────────────────────────────────────────
+    if not ddg_worked:
+        try:
+            print("[scraper] LI fallback: Bing", flush=True)
+            bing_url = f"https://www.bing.com/search?q={quote_plus(query)}&cc=in&setlang=en"
+            page.goto(bing_url, wait_until="domcontentloaded", timeout=30_000)
+            # Bing often redirects + lazy-loads — wait for the network to settle
+            try:
+                page.wait_for_load_state("networkidle", timeout=10_000)
+            except Exception:
+                pass
+            human_pause(2.5, 4.5)
+            human_mouse_wander(page)
+            human_scroll(page, 600)
+            human_pause(1, 2)
+
+            title = page.title()
+            print(f"[scraper] LI Bing title: '{title}'", flush=True)
+
+            if _is_blocked_page(page):
+                print("[scraper] LI Bing blocked", flush=True)
+            else:
+                bing_urls = _extract_linkedin_urls_from_page(page)
+                print(f"[scraper] LI Bing found: {len(bing_urls)} URLs", flush=True)
+                li_urls.update(bing_urls)
+        except Exception as e:
+            print(f"[scraper] LI Bing error: {e}", flush=True)
+
+    # ── Last resort: Google ────────────────────────────────────────────
+    if len(li_urls) == 0:
+        try:
+            print("[scraper] LI last resort: Google", flush=True)
+            google_url = f"https://www.google.com/search?q={quote_plus(query)}&hl=en&gl=in"
+            page.goto(google_url, wait_until="domcontentloaded", timeout=30_000)
+            try:
+                page.wait_for_load_state("networkidle", timeout=10_000)
+            except Exception:
+                pass
+            human_pause(2.5, 4.5)
+            human_mouse_wander(page)
+            human_scroll(page, 600)
+
+            title = page.title()
+            print(f"[scraper] LI Google title: '{title}'", flush=True)
+
+            if _is_blocked_page(page):
+                print("[scraper] LI Google blocked", flush=True)
+            else:
+                google_urls = _extract_linkedin_urls_from_page(page)
+                print(f"[scraper] LI Google found: {len(google_urls)} URLs", flush=True)
+                li_urls.update(google_urls)
+        except Exception as e:
+            print(f"[scraper] LI Google error: {e}", flush=True)
+
     results = list(li_urls)[:max_results]
-    print(f"[scraper] '{keyword}' → {len(results)} LinkedIn URLs via DDG", flush=True)
+    print(f"[scraper] '{keyword}' → {len(results)} LinkedIn URLs", flush=True)
     if results:
         print(f"[scraper] LI sample: {results[:3]}", flush=True)
     return results
