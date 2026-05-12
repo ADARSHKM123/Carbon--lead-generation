@@ -1,6 +1,6 @@
 import { useState, useMemo, useCallback } from 'react'
 import {
-  Users, Globe, Mail, Instagram, Facebook, Linkedin,
+  Users, Globe, Mail, Phone, MessageCircle, Instagram, Facebook, Linkedin,
   ChevronDown, Filter, CheckSquare, Square, X, ExternalLink,
   Send, Sparkles, Loader2, CheckCircle2, AlertCircle, Eye,
   Search, SlidersHorizontal, ArrowUpDown
@@ -58,7 +58,19 @@ function LeadCard({ lead, onToggle, onView, isSelected }) {
               <span className="text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-1.5 py-0.5 rounded-full font-medium">Has Website</span>
             )}
             {lead.hasEmail && (
-              <span className="text-[10px] bg-amber-500/10 text-amber-400 border border-amber-500/20 px-1.5 py-0.5 rounded-full font-medium">Email Found</span>
+              <span className="text-[10px] bg-amber-500/10 text-amber-400 border border-amber-500/20 px-1.5 py-0.5 rounded-full font-medium flex items-center gap-0.5">
+                <Mail className="w-2.5 h-2.5" /> Email
+              </span>
+            )}
+            {lead.hasPhone && (
+              <span className="text-[10px] bg-sky-500/10 text-sky-400 border border-sky-500/20 px-1.5 py-0.5 rounded-full font-medium flex items-center gap-0.5">
+                <Phone className="w-2.5 h-2.5" /> Phone
+              </span>
+            )}
+            {lead.hasWhatsapp && (
+              <span className="text-[10px] bg-green-500/10 text-green-400 border border-green-500/20 px-1.5 py-0.5 rounded-full font-medium flex items-center gap-0.5">
+                <MessageCircle className="w-2.5 h-2.5" /> WhatsApp
+              </span>
             )}
           </div>
           <p className="text-xs text-muted-foreground mt-0.5">{lead.handle}</p>
@@ -168,13 +180,31 @@ function LeadDetailPanel({ lead, onClose }) {
           </div>
         )}
 
-        {lead.email && (
+        {(lead.email || lead.phone || lead.whatsapp) && (
           <div>
-            <p className="text-xs font-medium text-foreground mb-1.5">Email</p>
-            <a href={`mailto:${lead.email}`} className="flex items-center gap-1.5 text-xs text-amber-400 hover:underline">
-              <Mail className="w-3.5 h-3.5" />
-              {lead.email}
-            </a>
+            <p className="text-xs font-medium text-foreground mb-1.5">Contact Info</p>
+            <div className="space-y-1.5">
+              {lead.email && (
+                <a href={`mailto:${lead.email}`} className="flex items-center gap-1.5 text-xs text-amber-400 hover:underline break-all">
+                  <Mail className="w-3.5 h-3.5 flex-shrink-0" />
+                  {lead.email}
+                </a>
+              )}
+              {lead.phone && (
+                <a href={`tel:${lead.phone}`} className="flex items-center gap-1.5 text-xs text-sky-400 hover:underline">
+                  <Phone className="w-3.5 h-3.5 flex-shrink-0" />
+                  {lead.phone}
+                </a>
+              )}
+              {lead.whatsapp && (
+                <a href={`https://wa.me/${lead.whatsapp.replace(/[^\d]/g, '')}`} target="_blank" rel="noreferrer"
+                  className="flex items-center gap-1.5 text-xs text-green-400 hover:underline">
+                  <MessageCircle className="w-3.5 h-3.5 flex-shrink-0" />
+                  {lead.whatsapp}
+                  <ExternalLink className="w-3 h-3" />
+                </a>
+              )}
+            </div>
           </div>
         )}
 

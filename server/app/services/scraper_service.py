@@ -74,6 +74,49 @@ def parse_follower_count(text: str) -> int:
     return int(num)
 
 
+def extract_contact_info(content: str) -> dict:
+    """Pull email, phone, and WhatsApp from raw page HTML."""
+    info = {"email": None, "phone": None, "whatsapp": None}
+
+    # Email — prefer explicit mailto: links, fall back to plain email regex
+    try:
+        mailto = re.search(r'mailto:([^"\'\s<>]+@[^"\'\s<>]+)', content, re.IGNORECASE)
+        if mailto:
+            info["email"] = mailto.group(1).strip()
+        else:
+            skip_email_substrings = (
+                "@example.", "@noreply", "@no-reply", "@facebook.com", "@instagram.com",
+                "@fbcdn.net", "@cdninstagram", ".png", ".jpg", ".gif", "@sentry",
+                "support@fb", "help@fb",
+            )
+            for candidate in re.findall(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}', content):
+                if not any(s in candidate.lower() for s in skip_email_substrings):
+                    info["email"] = candidate
+                    break
+    except Exception:
+        pass
+
+    # Phone — tel: hrefs are most reliable
+    try:
+        tel = re.search(r'tel:([+\d][\d\s()\-+]{6,20})', content)
+        if tel:
+            info["phone"] = re.sub(r'\s+', ' ', tel.group(1)).strip()
+    except Exception:
+        pass
+
+    # WhatsApp — wa.me or api.whatsapp.com/send?phone=
+    try:
+        wa = re.search(r'wa\.me/(\+?\d{6,15})', content)
+        if not wa:
+            wa = re.search(r'api\.whatsapp\.com/send\?phone=(\+?\d{6,15})', content)
+        if wa:
+            info["whatsapp"] = wa.group(1).strip()
+    except Exception:
+        pass
+
+    return info
+
+
 def human_pause(min_s=0.8, max_s=2.5):
     """Random pause mimicking human reaction time."""
     import time
@@ -406,6 +449,24 @@ def extract_facebook_page_details_sync(page, page_url: str) -> dict:
         combined = bio.lower()
         niches = list({v for k, v in niche_map.items() if k in combined}) or ["fashion"]
 
+        # Contact info — first scrape from main page content,
+        # then try the contact_and_basic_info page for richer data
+        try:
+            main_content = page.content()
+        except Exception:
+            main_content = ""
+        contact = extract_contact_info(main_content)
+        try:
+            contact_url = page_url.rstrip("/") + "/about_contact_and_basic_info"
+            page.goto(contact_url, wait_until="domcontentloaded", timeout=15_000)
+            human_pause(1.5, 3)
+            extra_contact = extract_contact_info(page.content())
+            for k, v in extra_contact.items():
+                if v and not contact.get(k):
+                    contact[k] = v
+        except Exception:
+            pass
+
         handle = "@" + page_url.rstrip("/").split("/")[-1]
         seed = (name[:2].upper() or "FB")
 
@@ -417,13 +478,17 @@ def extract_facebook_page_details_sync(page, page_url: str) -> dict:
             "bio": bio[:400] or "Fashion brand on Facebook",
             "followerCount": follower_count,
             "website": website or None,
-            "email": None,
+            "email": contact["email"],
+            "phone": contact["phone"],
+            "whatsapp": contact["whatsapp"],
             "city": city or "India",
             "state": "",
             "niches": niches[:4],
             "posts": [],
             "hasWebsite": bool(website),
-            "hasEmail": False,
+            "hasEmail": bool(contact["email"]),
+            "hasPhone": bool(contact["phone"]),
+            "hasWhatsapp": bool(contact["whatsapp"]),
             "pageUrl": page_url,
         }
 
@@ -742,6 +807,15 @@ def extract_instagram_profile_sync(page, profile_url: str) -> dict:
         combined = bio.lower()
         niches = list({v for k, v in niche_map.items() if k in combined}) or ["fashion"]
 
+        # Contact info from public IG profile (email/phone buttons + bio text)
+        contact = extract_contact_info(content)
+        # Also scan bio meta description specifically — IG often shows email there
+        if not contact["email"] and bio:
+            bio_contact = extract_contact_info(bio)
+            for k, v in bio_contact.items():
+                if v and not contact.get(k):
+                    contact[k] = v
+
         seed = (name[:2].upper() or "IG")
 
         return {
@@ -752,13 +826,17 @@ def extract_instagram_profile_sync(page, profile_url: str) -> dict:
             "bio": bio[:400] or "Indian fashion brand on Instagram",
             "followerCount": follower_count,
             "website": website or None,
-            "email": None,
+            "email": contact["email"],
+            "phone": contact["phone"],
+            "whatsapp": contact["whatsapp"],
             "city": "India",
             "state": "",
             "niches": niches[:4],
             "posts": [],
             "hasWebsite": bool(website),
-            "hasEmail": False,
+            "hasEmail": bool(contact["email"]),
+            "hasPhone": bool(contact["phone"]),
+            "hasWhatsapp": bool(contact["whatsapp"]),
             "pageUrl": profile_url,
         }
 
@@ -932,6 +1010,412 @@ async def discover_instagram_leads(
             if idle_ticks % 20 == 0 and on_progress:
                 try:
                     await on_progress({"message": "Reading Instagram profile...", "found": len(all_leads), "total": 0})
+                except Exception:
+                    pass
+            await asyncio.sleep(0.5)
+
+    thread.join(timeout=10)
+    return all_leads
+
+
+# ── LinkedIn scraping ──────────────────────────────────────────────────────
+
+# LinkedIn keeps companies at /company/<slug> and people at /in/<slug>.
+# Everything else is utility content we don't want to follow.
+LI_KEEP_PREFIXES = ("/company/", "/in/", "/school/")
+SKIP_LI_PATHS = {
+    "/jobs", "/learning", "/feed", "/posts", "/pulse", "/news",
+    "/showcase", "/legal", "/help", "/login", "/signup", "/checkpoint",
+    "/uas", "/talent", "/sales", "/groups", "/events", "/services",
+    "/today", "/directory", "/m/", "/redir",
+}
+
+
+def is_valid_linkedin_url(url: str) -> bool:
+    url = url.split("?")[0].split("#")[0].rstrip("/")
+    path = (
+        url.replace("https://www.linkedin.com", "")
+           .replace("https://linkedin.com", "")
+           .replace("https://in.linkedin.com", "")
+           .replace("https://india.linkedin.com", "")
+    )
+    if not path or path == "/":
+        return False
+    if any(path.startswith(s) for s in SKIP_LI_PATHS):
+        return False
+    if not any(path.startswith(s) for s in LI_KEEP_PREFIXES):
+        return False
+    # Must have a slug after the prefix
+    parts = [p for p in path.split("/") if p]
+    return len(parts) >= 2
+
+
+def normalize_linkedin_url(url: str) -> str:
+    """Strip subdomain variants like in.linkedin.com → www.linkedin.com."""
+    url = url.split("?")[0].split("#")[0].rstrip("/")
+    for variant in ("https://linkedin.com", "https://in.linkedin.com", "https://india.linkedin.com"):
+        if url.startswith(variant):
+            url = "https://www.linkedin.com" + url[len(variant):]
+            break
+    return url
+
+
+def search_linkedin_via_duckduckgo(page, search_term: str, max_results: int, msg_q: queue.Queue) -> list:
+    """Search DuckDuckGo for LinkedIn company pages + personal profiles."""
+    keyword = normalize_term(search_term)
+    # Search for both /company/ and /in/ pages
+    query = f'site:linkedin.com (company OR in) "{keyword}" india'
+    search_url = f"https://duckduckgo.com/html/?q={quote_plus(query)}&kl=in-en"
+
+    msg_q.put(("progress", {"message": f'Discovering LinkedIn for "{keyword}"...', "found": 0, "total": 0}))
+    print(f"[scraper] LI DDG search: {search_url}", flush=True)
+
+    try:
+        page.goto(search_url, wait_until="domcontentloaded", timeout=30_000)
+        human_pause(2, 4)
+        human_mouse_wander(page)
+    except Exception as e:
+        print(f"[scraper] LI DDG nav error: {e}", flush=True)
+        return []
+
+    li_urls = set()
+
+    for sel in ["a.result__a", "a.result__url", 'a[href*="linkedin.com"]']:
+        try:
+            for link in page.query_selector_all(sel):
+                raw = (link.get_attribute("href") or "").strip()
+                if "duckduckgo.com/l/" in raw or raw.startswith("/l/"):
+                    qs = parse_qs(urlparse(raw).query)
+                    raw = unquote(qs.get("uddg", [""])[0])
+                if "linkedin.com" not in raw:
+                    continue
+                raw = normalize_linkedin_url(raw)
+                if is_valid_linkedin_url(raw):
+                    li_urls.add(raw)
+        except Exception:
+            continue
+
+    # Regex fallback on raw HTML
+    try:
+        content = page.content()
+        for match in re.findall(
+            r'https?://(?:www\.|in\.|india\.)?linkedin\.com/(company|in|school)/([A-Za-z0-9._\-]+)',
+            content,
+        ):
+            kind, slug = match
+            url = f"https://www.linkedin.com/{kind}/{slug}"
+            if is_valid_linkedin_url(url):
+                li_urls.add(url)
+    except Exception:
+        pass
+
+    results = list(li_urls)[:max_results]
+    print(f"[scraper] '{keyword}' → {len(results)} LinkedIn URLs via DDG", flush=True)
+    if results:
+        print(f"[scraper] LI sample: {results[:3]}", flush=True)
+    return results
+
+
+def extract_linkedin_profile_sync(page, profile_url: str) -> dict:
+    """
+    Extracts data from a public LinkedIn page.
+    Without login LinkedIn shows mostly OG/meta tags + a sign-in wall,
+    but that's enough for: name, headline/description, location,
+    company logo, and follower count for company pages.
+    """
+    try:
+        print(f"[scraper] LI visiting: {profile_url}", flush=True)
+        page.goto(profile_url, wait_until="domcontentloaded", timeout=25_000)
+        human_pause(2, 4)
+        human_mouse_wander(page)
+        title = page.title()
+        print(f"[scraper] LI landed: {profile_url} | Title: '{title}'", flush=True)
+
+        content = page.content()
+        is_company = "/company/" in profile_url
+        is_school = "/school/" in profile_url
+        slug = profile_url.rstrip("/").split("/")[-1]
+        handle = f"@{slug}"
+
+        # Name — from page title or og:title
+        name = ""
+        try:
+            og_title = page.query_selector('meta[property="og:title"]')
+            if og_title:
+                name = (og_title.get_attribute("content") or "").strip()
+            if not name:
+                # Strip " | LinkedIn" suffix from window title
+                name = re.split(r'\s*[-|]\s*LinkedIn', title)[0].strip()
+        except Exception:
+            pass
+
+        # Bio / headline — meta description
+        bio = ""
+        try:
+            meta = page.query_selector('meta[name="description"]')
+            if meta:
+                bio = (meta.get_attribute("content") or "").strip()
+            if not bio:
+                og_desc = page.query_selector('meta[property="og:description"]')
+                if og_desc:
+                    bio = (og_desc.get_attribute("content") or "").strip()
+        except Exception:
+            pass
+
+        # Follower count — LinkedIn shows it in JSON/text as "X followers"
+        follower_count = 0
+        for pattern in [
+            r'([\d,.]+[KMk]?)\s*followers',
+            r'"followerCount"\s*:\s*(\d+)',
+            r'"followers"\s*:\s*\{[^}]*"count"\s*:\s*(\d+)',
+        ]:
+            try:
+                m = re.search(pattern, content, re.IGNORECASE)
+                if m:
+                    follower_count = parse_follower_count(m.group(1))
+                    if follower_count > 0:
+                        break
+            except Exception:
+                pass
+
+        # Location / city — LinkedIn often surfaces this in meta or json
+        city = ""
+        try:
+            for city_name in [
+                "Mumbai", "Delhi", "New Delhi", "Bangalore", "Bengaluru", "Hyderabad",
+                "Chennai", "Kolkata", "Jaipur", "Surat", "Pune", "Ahmedabad",
+                "Lucknow", "Gurugram", "Gurgaon", "Noida", "Chandigarh", "Indore",
+            ]:
+                if city_name.lower() in (bio + " " + content[:5000]).lower():
+                    city = city_name.replace("Gurgaon", "Gurugram")
+                    break
+        except Exception:
+            pass
+
+        # External website — for company pages LinkedIn lists the brand site
+        website = ""
+        try:
+            urls = re.findall(r'href="(https?://[^"]+)"', content)
+            skip = (
+                "linkedin.com", "licdn.com", "facebook.com", "fbcdn.net",
+                "instagram.com", "wa.me", "youtube.com", "twitter.com", "x.com",
+                "google.com", "apple.com",
+            )
+            for url in urls:
+                clean = url.split("?")[0]
+                if any(s in clean for s in skip):
+                    continue
+                if any(clean.endswith(ext) for ext in (".ico", ".png", ".jpg", ".css", ".js", ".woff")):
+                    continue
+                if re.search(r'\.[a-z]{2,6}(/|$)', clean, re.IGNORECASE):
+                    website = clean
+                    break
+        except Exception:
+            pass
+
+        # Contact info from page content (rare on LinkedIn but possible from bio)
+        contact = extract_contact_info(content)
+        if not contact["email"] and bio:
+            bio_contact = extract_contact_info(bio)
+            for k, v in bio_contact.items():
+                if v and not contact.get(k):
+                    contact[k] = v
+
+        # Niche tags from bio
+        niche_map = {
+            "saree": "sarees", "lehenga": "lehengas", "kurta": "kurtas",
+            "ethnic": "ethnic wear", "handloom": "handloom",
+            "sustainable": "sustainable fashion", "streetwear": "streetwear",
+            "bridal": "bridal wear", "kids": "kidswear",
+            "silk": "silk", "khadi": "khadi", "shirt": "shirts",
+            "founder": "founder", "designer": "designer", "stylist": "stylist",
+        }
+        combined = bio.lower()
+        niches = list({v for k, v in niche_map.items() if k in combined}) or [
+            "company" if is_company else ("school" if is_school else "founder/profile")
+        ]
+
+        seed = (name[:2].upper() or "LI")
+        avatar_bg = "0a66c2"  # LinkedIn blue
+
+        return {
+            "brandName": name or handle,
+            "handle": handle,
+            "platform": "linkedin",
+            "avatar": f"https://api.dicebear.com/9.x/initials/svg?seed={seed}&backgroundColor={avatar_bg}&fontColor=ffffff",
+            "bio": (bio[:400] or ("LinkedIn company page" if is_company else "LinkedIn profile")),
+            "followerCount": follower_count,
+            "website": website or None,
+            "email": contact["email"],
+            "phone": contact["phone"],
+            "whatsapp": contact["whatsapp"],
+            "city": city or "India",
+            "state": "",
+            "niches": niches[:4],
+            "posts": [],
+            "hasWebsite": bool(website),
+            "hasEmail": bool(contact["email"]),
+            "hasPhone": bool(contact["phone"]),
+            "hasWhatsapp": bool(contact["whatsapp"]),
+            "pageUrl": profile_url,
+            "linkedinType": "company" if is_company else ("school" if is_school else "person"),
+        }
+
+    except Exception as e:
+        print(f"[scraper] LI extract error for {profile_url}: {e}", flush=True)
+        return {}
+
+
+def _run_linkedin_discovery(search_terms: list, filters: dict, max_per_term: int, msg_q: queue.Queue):
+    import sys, asyncio
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
+    def progress(msg, found=0, total=0):
+        msg_q.put(("progress", {"message": msg, "found": found, "total": total}))
+
+    all_leads = []
+    seen_urls = set()
+    lead_id_counter = [3000]
+
+    try:
+        with sync_playwright() as p:
+            # LinkedIn flags logged-in accounts the hardest — use anonymous
+            # for discovery. Saved LI session is reserved for messaging only.
+            search_ctx = make_context(p)
+            search_page = search_ctx.new_page()
+
+            li_ctx = make_context(p)
+            detail_page = li_ctx.new_page()
+
+            # Discover URLs
+            all_page_urls = []
+            for term in search_terms:
+                urls = search_linkedin_via_duckduckgo(search_page, term, max_per_term, msg_q)
+                for url in urls:
+                    if url not in seen_urls:
+                        seen_urls.add(url)
+                        all_page_urls.append(url)
+                progress(
+                    f"Found {len(all_page_urls)} LinkedIn pages so far...",
+                    found=len(all_leads),
+                    total=len(all_page_urls),
+                )
+                human_pause(3, 6)
+
+            search_ctx.close()
+
+            if not all_page_urls:
+                progress("No LinkedIn pages found.", found=0, total=0)
+                msg_q.put(("complete", 0))
+                li_ctx.close()
+                return
+
+            progress(
+                f"Extracting data from {len(all_page_urls)} LinkedIn pages...",
+                found=0,
+                total=len(all_page_urls),
+            )
+
+            min_followers = filters.get("min_followers", 0)
+            must_have_website = filters.get("must_have_website", False)
+
+            for i, profile_url in enumerate(all_page_urls):
+                progress(
+                    f"Reading LinkedIn page {i + 1}/{len(all_page_urls)}: {profile_url.rstrip('/').split('/')[-1]}",
+                    found=len(all_leads),
+                    total=len(all_page_urls),
+                )
+
+                details = extract_linkedin_profile_sync(detail_page, profile_url)
+
+                try:
+                    human_scroll(detail_page, random.randint(300, 700))
+                    human_mouse_wander(detail_page)
+                except Exception:
+                    pass
+
+                if not details or not details.get("brandName"):
+                    continue
+                if details["followerCount"] > 0 and details["followerCount"] < min_followers:
+                    continue
+                if must_have_website and not details["hasWebsite"]:
+                    continue
+
+                lead_id_counter[0] += 1
+                details["id"] = str(lead_id_counter[0])
+                details["status"] = "new"
+                details["selected"] = True
+                details["discoveredAt"] = datetime.datetime.utcnow().isoformat() + "Z"
+                details["personalizedMessage"] = None
+                details["outreachStatus"] = None
+
+                all_leads.append(details)
+                msg_q.put(("lead", details))
+
+                # LinkedIn rate-limits aggressively — longer pauses
+                human_pause(10, 18)
+
+            li_ctx.close()
+
+        msg_q.put(("complete", len(all_leads)))
+
+    except Exception as e:
+        print(f"[scraper] LI discovery error: {e}", flush=True)
+        msg_q.put(("error", str(e)))
+
+
+async def discover_linkedin_leads(
+    search_terms: list,
+    filters: dict,
+    on_progress=None,
+    on_lead_found=None,
+    max_per_term: int = 15,
+) -> list:
+    msg_q: queue.Queue = queue.Queue()
+
+    thread = threading.Thread(
+        target=_run_linkedin_discovery,
+        args=(search_terms, filters, max_per_term, msg_q),
+        daemon=True,
+    )
+    thread.start()
+
+    all_leads = []
+    idle_ticks = 0
+
+    while True:
+        try:
+            event_type, value = msg_q.get_nowait()
+            idle_ticks = 0
+
+            if event_type == "progress" and on_progress:
+                try:
+                    await on_progress(value)
+                except Exception:
+                    pass
+            elif event_type == "lead":
+                all_leads.append(value)
+                if on_lead_found:
+                    try:
+                        await on_lead_found(value)
+                    except Exception:
+                        pass
+            elif event_type in ("complete", "error"):
+                if event_type == "error" and on_progress:
+                    try:
+                        await on_progress({"message": f"Error: {value}", "found": 0, "total": 0})
+                    except Exception:
+                        pass
+                break
+
+        except queue.Empty:
+            if not thread.is_alive() and msg_q.empty():
+                break
+            idle_ticks += 1
+            if idle_ticks % 20 == 0 and on_progress:
+                try:
+                    await on_progress({"message": "Reading LinkedIn page...", "found": len(all_leads), "total": 0})
                 except Exception:
                     pass
             await asyncio.sleep(0.5)

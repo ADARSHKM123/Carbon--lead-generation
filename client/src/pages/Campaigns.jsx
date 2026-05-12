@@ -1,8 +1,8 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import {
   Plus, Megaphone, Eye, Clock, Instagram, Facebook, Linkedin,
-  ChevronRight, X, Hash, AlertCircle, Zap, Search, Tag
+  ChevronRight, X, Hash, AlertCircle, Zap, Search, Tag, History, Trash2
 } from 'lucide-react'
 import Header from '../components/layout/Header'
 import TemplateEditor from '../components/features/campaigns/TemplateEditor'
@@ -17,6 +17,60 @@ const STATUS_BADGE = {
 }
 
 const PLATFORM_ICON = { instagram: Instagram, facebook: Facebook, linkedin: Linkedin }
+
+// ── Recent search-terms history (persisted to localStorage) ─────────────────
+
+const TERM_HISTORY_KEY = 'carbon.searchTermHistory.v1'
+const TERM_HISTORY_LIMIT = 30
+
+function loadTermHistory() {
+  try {
+    const raw = localStorage.getItem(TERM_HISTORY_KEY)
+    if (!raw) return []
+    const arr = JSON.parse(raw)
+    return Array.isArray(arr) ? arr.filter(t => typeof t === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+function saveTermHistory(terms) {
+  try {
+    localStorage.setItem(TERM_HISTORY_KEY, JSON.stringify(terms.slice(0, TERM_HISTORY_LIMIT)))
+  } catch {
+    // ignore quota errors
+  }
+}
+
+function useTermHistory() {
+  const [history, setHistory] = useState(loadTermHistory)
+
+  const addToHistory = (term) => {
+    if (!term?.trim()) return
+    setHistory(prev => {
+      // Move to front; deduplicate case-insensitively
+      const cleaned = prev.filter(t => t.toLowerCase() !== term.toLowerCase())
+      const next = [term, ...cleaned].slice(0, TERM_HISTORY_LIMIT)
+      saveTermHistory(next)
+      return next
+    })
+  }
+
+  const removeFromHistory = (term) => {
+    setHistory(prev => {
+      const next = prev.filter(t => t !== term)
+      saveTermHistory(next)
+      return next
+    })
+  }
+
+  const clearHistory = () => {
+    setHistory([])
+    saveTermHistory([])
+  }
+
+  return { history, addToHistory, removeFromHistory, clearHistory }
+}
 
 // ── Campaign card ────────────────────────────────────────────────────────────
 
@@ -98,6 +152,7 @@ function CampaignCard({ campaign, onDiscover }) {
 
 function CreateCampaignDrawer({ open, onClose, onSave }) {
   const { templates } = useApp()
+  const { history, addToHistory, removeFromHistory, clearHistory } = useTermHistory()
   const [step, setStep] = useState(1)
   const [form, setForm] = useState({
     name: '',
@@ -119,16 +174,26 @@ function CreateCampaignDrawer({ open, onClose, onSave }) {
     }))
   }
 
-  const addTerm = () => {
-    const raw = form.termInput.trim()
+  const addTerm = (rawTerm) => {
+    const raw = (rawTerm ?? form.termInput).trim()
     if (!raw) return
-    // Accept both #hashtags and plain keywords
-    const term = raw.startsWith('#') ? raw : raw
-    if (!form.searchTerms.includes(term)) {
-      updateForm('searchTerms', [...form.searchTerms, term])
+    if (!form.searchTerms.some(t => t.toLowerCase() === raw.toLowerCase())) {
+      updateForm('searchTerms', [...form.searchTerms, raw])
     }
+    addToHistory(raw)
     updateForm('termInput', '')
   }
+
+  // Filter history: hide terms already added to this campaign,
+  // and apply the current input as a substring filter
+  const suggestions = useMemo(() => {
+    const already = new Set(form.searchTerms.map(t => t.toLowerCase()))
+    const q = form.termInput.trim().toLowerCase()
+    return history
+      .filter(t => !already.has(t.toLowerCase()))
+      .filter(t => !q || t.toLowerCase().includes(q))
+      .slice(0, 12)
+  }, [history, form.searchTerms, form.termInput])
 
   const handleSave = () => {
     const campaign = {
@@ -247,7 +312,7 @@ function CreateCampaignDrawer({ open, onClose, onSave }) {
                     />
                   </div>
                   <button
-                    onClick={addTerm}
+                    onClick={() => addTerm()}
                     className="px-3 py-2 bg-primary/10 text-primary border border-primary/30 rounded-lg text-sm font-medium hover:bg-primary/20 transition-colors"
                   >
                     Add
@@ -271,7 +336,49 @@ function CreateCampaignDrawer({ open, onClose, onSave }) {
                   ))}
                 </div>
 
-                {form.searchTerms.length === 0 && (
+                {/* Recent terms — pulled from localStorage */}
+                {suggestions.length > 0 && (
+                  <div className="mt-3 p-3 bg-secondary/40 border border-border rounded-lg">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-[11px] font-medium text-muted-foreground flex items-center gap-1.5">
+                        <History className="w-3 h-3" />
+                        {form.termInput ? 'Matching recent terms' : 'Previously used — click to reuse'}
+                      </span>
+                      <button
+                        onClick={clearHistory}
+                        className="text-[11px] text-muted-foreground hover:text-destructive flex items-center gap-1 transition-colors"
+                      >
+                        <Trash2 className="w-3 h-3" /> Clear
+                      </button>
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {suggestions.map(term => (
+                        <span
+                          key={term}
+                          className={cn(
+                            'group flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border font-medium cursor-pointer transition-all',
+                            term.startsWith('#')
+                              ? 'bg-violet-500/5 text-violet-400/80 border-violet-500/15 hover:bg-violet-500/15 hover:border-violet-500/30'
+                              : 'bg-blue-500/5 text-blue-400/80 border-blue-500/15 hover:bg-blue-500/15 hover:border-blue-500/30'
+                          )}
+                        >
+                          <button onClick={() => addTerm(term)} className="flex items-center gap-1">
+                            {term.startsWith('#') ? <Hash className="w-2.5 h-2.5" /> : <Search className="w-2.5 h-2.5" />}
+                            {term}
+                          </button>
+                          <button
+                            onClick={() => removeFromHistory(term)}
+                            className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive transition-opacity"
+                          >
+                            <X className="w-2.5 h-2.5" />
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {form.searchTerms.length === 0 && history.length === 0 && (
                   <p className="text-xs text-muted-foreground mt-1.5 flex items-center gap-1">
                     <AlertCircle className="w-3.5 h-3.5" />
                     Suggestions: "ethnic wear india", "fashion brand mumbai", "#indianfashion", "#handloom"

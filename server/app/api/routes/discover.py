@@ -1,7 +1,9 @@
 import asyncio
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app.models.schemas import DiscoverRequest
-from app.services.scraper_service import discover_facebook_leads, discover_instagram_leads
+from app.services.scraper_service import (
+    discover_facebook_leads, discover_instagram_leads, discover_linkedin_leads
+)
 from app.services.session_service import (
     setup_session, session_exists, PLATFORM_LOGIN_CONFIG
 )
@@ -121,6 +123,14 @@ async def discover_ws(websocket: WebSocket):
                 )
             elif platform == "instagram":
                 platform_leads = await discover_instagram_leads(
+                    search_terms=search_terms,
+                    filters=filters,
+                    on_progress=on_progress,
+                    on_lead_found=on_lead_found,
+                    max_per_term=per_term,
+                )
+            elif platform == "linkedin":
+                platform_leads = await discover_linkedin_leads(
                     search_terms=search_terms,
                     filters=filters,
                     on_progress=on_progress,

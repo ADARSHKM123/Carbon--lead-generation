@@ -71,9 +71,9 @@ export default function MessagePreviewModal({ leads, campaign, onClose, onConfir
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
-      <div className="bg-background border border-border rounded-2xl w-full max-w-2xl flex flex-col overflow-hidden shadow-2xl animate-fade-in">
+      <div className="bg-background border border-border rounded-2xl w-full max-w-2xl max-h-[90vh] flex flex-col overflow-hidden shadow-2xl animate-fade-in">
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-border">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-border flex-shrink-0">
           <div className="flex items-center gap-3">
             <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center">
               <Sparkles className="w-4 h-4 text-primary" />
@@ -91,7 +91,7 @@ export default function MessagePreviewModal({ leads, campaign, onClose, onConfir
         </div>
 
         {/* Summary bar */}
-        <div className="flex items-center gap-6 px-6 py-3 bg-secondary border-b border-border text-xs">
+        <div className="flex items-center gap-6 px-6 py-3 bg-secondary border-b border-border text-xs flex-shrink-0">
           <div className="flex items-center gap-2">
             <span className="w-2 h-2 rounded-full bg-primary" />
             <span className="text-muted-foreground">Total selected:</span>
@@ -199,7 +199,7 @@ export default function MessagePreviewModal({ leads, campaign, onClose, onConfir
         </div>
 
         {/* Footer */}
-        <div className="px-6 py-4 border-t border-border flex items-center justify-between bg-background">
+        <div className="px-6 py-4 border-t border-border flex items-center justify-between bg-background flex-shrink-0">
           <button onClick={onClose} className="text-sm text-muted-foreground hover:text-foreground transition-colors">
             Cancel — go back
           </button>

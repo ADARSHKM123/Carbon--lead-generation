@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useMemo } from 'react'
 import {
   X, Search, Loader2, CheckCircle2, AlertCircle, Wifi, WifiOff,
-  Instagram, Facebook, Linkedin, Globe, Mail, Send, Sparkles,
+  Instagram, Facebook, Linkedin, Globe, Mail, Phone, MessageCircle, Send, Sparkles,
   CheckSquare, Square, SlidersHorizontal, Users, Filter,
   ChevronRight, ExternalLink, Zap, Play, StopCircle
 } from 'lucide-react'
@@ -49,8 +49,23 @@ function DiscoveredLeadCard({ lead, selected, onToggle }) {
         <div className="flex items-center gap-1.5 flex-wrap">
           <span className="text-sm font-semibold text-foreground truncate">{lead.brandName}</span>
           {lead.hasWebsite && (
-            <span className="text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-1.5 py-0.5 rounded-full font-medium flex-shrink-0">
-              Website
+            <span className="text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-1.5 py-0.5 rounded-full font-medium flex-shrink-0 flex items-center gap-0.5">
+              <Globe className="w-2.5 h-2.5" /> Site
+            </span>
+          )}
+          {lead.hasEmail && (
+            <span className="text-[10px] bg-amber-500/10 text-amber-400 border border-amber-500/20 px-1.5 py-0.5 rounded-full font-medium flex-shrink-0 flex items-center gap-0.5">
+              <Mail className="w-2.5 h-2.5" /> Email
+            </span>
+          )}
+          {lead.hasPhone && (
+            <span className="text-[10px] bg-sky-500/10 text-sky-400 border border-sky-500/20 px-1.5 py-0.5 rounded-full font-medium flex-shrink-0 flex items-center gap-0.5">
+              <Phone className="w-2.5 h-2.5" /> Phone
+            </span>
+          )}
+          {lead.hasWhatsapp && (
+            <span className="text-[10px] bg-green-500/10 text-green-400 border border-green-500/20 px-1.5 py-0.5 rounded-full font-medium flex-shrink-0 flex items-center gap-0.5">
+              <MessageCircle className="w-2.5 h-2.5" /> WA
             </span>
           )}
           {lead.pageUrl && (
