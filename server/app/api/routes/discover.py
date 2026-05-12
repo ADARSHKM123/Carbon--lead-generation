@@ -76,12 +76,20 @@ async def discover_ws(websocket: WebSocket):
         params = await websocket.receive_json()
         search_terms = params.get("search_terms", [])
         filters = params.get("filters", {})
-        max_per_term = params.get("max_per_term", 15)
+        # Accept both old (max_per_term) and new (max_results) for compat
+        max_results = params.get("max_results") or params.get("max_per_term") or 15
         platforms = params.get("platforms") or ["facebook"]
 
         if not search_terms:
             await websocket.send_json({"type": "error", "message": "No search terms provided."})
             return
+
+        # Split total cap across platforms × terms so the final result count
+        # matches the user-set max_results value
+        num_buckets = max(1, len(platforms) * len(search_terms))
+        per_term = max(1, max_results // num_buckets + 1)
+
+        leads_remaining = [max_results]  # mutable counter shared with callbacks
 
         async def on_progress(data: dict):
             try:
@@ -90,6 +98,9 @@ async def discover_ws(websocket: WebSocket):
                 pass
 
         async def on_lead_found(lead: dict):
+            if leads_remaining[0] <= 0:
+                return
+            leads_remaining[0] -= 1
             try:
                 await websocket.send_json({"type": "lead", "lead": lead})
             except Exception:
@@ -97,13 +108,16 @@ async def discover_ws(websocket: WebSocket):
 
         leads = []
         for platform in platforms:
+            if leads_remaining[0] <= 0:
+                break
+
             if platform == "facebook":
                 platform_leads = await discover_facebook_leads(
                     search_terms=search_terms,
                     filters=filters,
                     on_progress=on_progress,
                     on_lead_found=on_lead_found,
-                    max_per_term=max_per_term,
+                    max_per_term=per_term,
                 )
             elif platform == "instagram":
                 platform_leads = await discover_instagram_leads(
@@ -111,7 +125,7 @@ async def discover_ws(websocket: WebSocket):
                     filters=filters,
                     on_progress=on_progress,
                     on_lead_found=on_lead_found,
-                    max_per_term=max_per_term,
+                    max_per_term=per_term,
                 )
             else:
                 await on_progress({
@@ -121,7 +135,8 @@ async def discover_ws(websocket: WebSocket):
                 })
                 platform_leads = []
 
-            leads.extend(platform_leads)
+            # Only count leads we actually forwarded (callback gated by cap)
+            leads.extend(platform_leads[: max(0, max_results - len(leads))])
 
         await websocket.send_json({"type": "complete", "total": len(leads)})
 

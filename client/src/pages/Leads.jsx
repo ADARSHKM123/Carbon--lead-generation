@@ -65,11 +65,24 @@ function LeadCard({ lead, onToggle, onView, isSelected }) {
           <p className="text-xs text-muted-foreground mt-1 line-clamp-2 leading-relaxed">{lead.bio}</p>
 
           <div className="flex items-center gap-3 mt-2 flex-wrap">
-            <span className="text-xs font-semibold text-foreground">{formatNumber(lead.followerCount)} followers</span>
+            <span className="text-xs font-semibold text-foreground">
+              {lead.followerCount > 0 ? `${formatNumber(lead.followerCount)} followers` : 'followers hidden'}
+            </span>
             <span className="text-xs text-muted-foreground">{lead.city}</span>
             {lead.niches.slice(0, 2).map(n => (
               <span key={n} className="text-[10px] bg-secondary text-muted-foreground px-1.5 py-0.5 rounded-full">{n}</span>
             ))}
+            {lead.pageUrl && (
+              <a
+                href={lead.pageUrl}
+                target="_blank"
+                rel="noreferrer"
+                onClick={e => e.stopPropagation()}
+                className="ml-auto flex items-center gap-1 text-[11px] text-primary hover:underline font-medium"
+              >
+                View Profile <ExternalLink className="w-3 h-3" />
+              </a>
+            )}
           </div>
         </div>
       </div>
@@ -104,6 +117,19 @@ function LeadDetailPanel({ lead, onClose }) {
             </div>
           </div>
         </div>
+
+        {lead.pageUrl && (
+          <a
+            href={lead.pageUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="flex items-center justify-center gap-2 w-full px-3 py-2 bg-primary/10 text-primary border border-primary/30 rounded-lg text-sm font-medium hover:bg-primary/20 transition-colors"
+          >
+            {PlatformIcon && <PlatformIcon className="w-4 h-4" />}
+            View Profile on {lead.platform.charAt(0).toUpperCase() + lead.platform.slice(1)}
+            <ExternalLink className="w-3.5 h-3.5" />
+          </a>
+        )}
 
         <div className="grid grid-cols-2 gap-2">
           <div className="bg-secondary rounded-lg p-3 text-center">

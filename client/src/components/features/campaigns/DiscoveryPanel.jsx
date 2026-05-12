@@ -123,7 +123,7 @@ export default function DiscoveryPanel({ campaign, open, onClose, onLeadsAdded }
   // Filters
   const [minFollowers, setMinFollowers] = useState(1000)
   const [mustHaveWebsite, setMustHaveWebsite] = useState(false)
-  const [maxPerTerm, setMaxPerTerm] = useState(15)
+  const [maxResults, setMaxResults] = useState(15)
 
   const wsRef = useRef(null)
   const logEndRef = useRef(null)
@@ -183,7 +183,7 @@ export default function DiscoveryPanel({ campaign, open, onClose, onLeadsAdded }
         search_terms: campaign.searchTerms,
         platforms: campaign.platforms?.length ? campaign.platforms : ['facebook'],
         filters: { min_followers: minFollowers, must_have_website: mustHaveWebsite },
-        max_per_term: maxPerTerm,
+        max_results: maxResults,
       }))
     }
 
@@ -347,17 +347,17 @@ export default function DiscoveryPanel({ campaign, open, onClose, onLeadsAdded }
 
               <div>
                 <label className="text-xs font-medium text-foreground block mb-1">
-                  Max results per term: <span className="text-primary">{maxPerTerm}</span>
+                  Max results: <span className="text-primary">{maxResults}</span>
                 </label>
                 <input
-                  type="range" min={5} max={50} step={5}
-                  value={maxPerTerm}
-                  onChange={e => setMaxPerTerm(parseInt(e.target.value))}
+                  type="range" min={5} max={100} step={5}
+                  value={maxResults}
+                  onChange={e => setMaxResults(parseInt(e.target.value))}
                   disabled={isRunning}
                   className="w-full accent-primary"
                 />
                 <div className="flex justify-between text-[10px] text-muted-foreground mt-0.5">
-                  <span>5</span><span>50</span>
+                  <span>5</span><span>100 total</span>
                 </div>
               </div>
 

@@ -775,20 +775,34 @@ def _run_instagram_discovery(search_terms: list, filters: dict, max_per_term: in
     def progress(msg, found=0, total=0):
         msg_q.put(("progress", {"message": msg, "found": found, "total": total}))
 
-    use_session = session_exists("instagram")
     all_leads = []
     seen_urls = set()
     lead_id_counter = [2000]
 
     try:
         with sync_playwright() as p:
+            # Both contexts are anonymous — Instagram flags logged-in accounts
+            # much more aggressively for automation. Saved IG session is reserved
+            # for DM sending only, never used during discovery.
             search_ctx = make_context(p)
             search_page = search_ctx.new_page()
 
-            ig_ctx = make_context(p, user_data_dir=session_path("instagram")) if use_session else make_context(p)
+            ig_ctx = make_context(p)
             detail_page = ig_ctx.new_page()
 
-            # Discover URLs
+            # Warmup: visit instagram.com home like a normal user would,
+            # then dismiss any popups, before hitting profile pages.
+            try:
+                print("[scraper] IG warmup: visiting home", flush=True)
+                detail_page.goto("https://www.instagram.com/", wait_until="domcontentloaded", timeout=20_000)
+                human_pause(3, 6)
+                human_mouse_wander(detail_page)
+                human_scroll(detail_page, 400)
+                human_pause(2, 4)
+            except Exception as e:
+                print(f"[scraper] IG warmup skipped: {e}", flush=True)
+
+            # Discover URLs via DuckDuckGo
             all_page_urls = []
             for term in search_terms:
                 urls = search_instagram_via_duckduckgo(search_page, term, max_per_term, msg_q)
@@ -801,7 +815,7 @@ def _run_instagram_discovery(search_terms: list, filters: dict, max_per_term: in
                     found=len(all_leads),
                     total=len(all_page_urls),
                 )
-                human_pause(2, 4)
+                human_pause(3, 6)  # Slower pacing between search terms
 
             search_ctx.close()
 
@@ -829,6 +843,13 @@ def _run_instagram_discovery(search_terms: list, filters: dict, max_per_term: in
 
                 details = extract_instagram_profile_sync(detail_page, profile_url)
 
+                # After each profile: scroll + mouse wander like a human browsing
+                try:
+                    human_scroll(detail_page, random.randint(300, 700))
+                    human_mouse_wander(detail_page)
+                except Exception:
+                    pass
+
                 if not details or not details.get("brandName"):
                     continue
                 if details["followerCount"] > 0 and details["followerCount"] < min_followers:
@@ -847,7 +868,9 @@ def _run_instagram_discovery(search_terms: list, filters: dict, max_per_term: in
                 all_leads.append(details)
                 msg_q.put(("lead", details))
 
-                human_pause(3, 7)
+                # Longer, more variable delays between IG profile visits
+                # to avoid triggering rate-limiting on the anonymous browser
+                human_pause(8, 15)
 
             ig_ctx.close()
 
