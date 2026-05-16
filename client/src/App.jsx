@@ -4,11 +4,12 @@ import Sidebar from './components/layout/Sidebar'
 import Dashboard from './pages/Dashboard'
 import Campaigns from './pages/Campaigns'
 import Leads from './pages/Leads'
+import Scraper from './pages/Scraper'
 import Inbox from './pages/Inbox'
 import Templates from './pages/Templates'
 import Settings from './pages/Settings'
 import { cn } from './lib/utils'
-       
+  
 function ToastContainer() {
   const { toasts } = useApp()
   return (
@@ -37,6 +38,7 @@ function AppShell() {
           <Route path="/" element={<Dashboard />} />
           <Route path="/campaigns" element={<Campaigns />} />
           <Route path="/leads" element={<Leads />} />
+          <Route path="/scraper" element={<Scraper />} />
           <Route path="/inbox" element={<Inbox />} />
           <Route path="/templates" element={<Templates />} />
           <Route path="/settings" element={<Settings />} />

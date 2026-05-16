@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List
 
 class Lead(BaseModel):
@@ -9,11 +9,16 @@ class Lead(BaseModel):
     bio: str
     followerCount: int
     website: Optional[str] = None
+    bioLinks: List[str] = Field(default_factory=list)
     email: Optional[str] = None
+    phone: Optional[str] = None
+    whatsapp: Optional[str] = None
     city: str
     niches: List[str]
     hasWebsite: bool
     hasEmail: bool
+    hasPhone: bool = False
+    hasWhatsapp: bool = False
 
 class PersonalizeRequest(BaseModel):
     leads: List[Lead]

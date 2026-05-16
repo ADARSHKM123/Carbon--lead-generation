@@ -1,7 +1,7 @@
 import { NavLink } from 'react-router-dom'
 import {
   LayoutDashboard, Megaphone, Users, Inbox,
-  FileText, Settings, Zap, ChevronRight, Bell
+  FileText, Settings, Zap, ChevronRight, Bell, Instagram
 } from 'lucide-react'
 import { cn } from '../../lib/utils'
 import { useApp } from '../../context/AppContext'
@@ -10,6 +10,7 @@ const NAV = [
   { to: '/', icon: LayoutDashboard, label: 'Dashboard' },
   { to: '/campaigns', icon: Megaphone, label: 'Campaigns' },
   { to: '/leads', icon: Users, label: 'Leads' },
+  { to: '/scraper', icon: Instagram, label: 'IG Scraper' },
   { to: '/inbox', icon: Inbox, label: 'Inbox', badge: true },
   { to: '/templates', icon: FileText, label: 'Templates' },
   { to: '/settings', icon: Settings, label: 'Settings' },

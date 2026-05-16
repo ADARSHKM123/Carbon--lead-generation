@@ -17,6 +17,7 @@ Human-mimicry applied:
 
 import asyncio
 import datetime
+import html
 import queue
 import random
 import re
@@ -74,13 +75,240 @@ def parse_follower_count(text: str) -> int:
     return int(num)
 
 
+STATIC_URL_EXTENSIONS = (
+    ".ico", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".css", ".js",
+    ".woff", ".woff2", ".ttf", ".webp", ".avif", ".mp4", ".webm",
+)
+
+PLATFORM_INFRA_DOMAINS = (
+    "facebook.com", "fb.com", "fb.me", "fbcdn.net",
+    "instagram.com", "cdninstagram.com",
+    "about.meta.com", "meta.com", "developers.facebook.com",
+    "help.instagram.com", "privacycenter.instagram.com",
+)
+
+NON_WEBSITE_CONTACT_DOMAINS = (
+    "wa.me", "whatsapp.com", "api.whatsapp.com",
+)
+
+SOCIAL_PROFILE_DOMAINS = (
+    "twitter.com", "x.com", "youtube.com", "youtu.be", "tiktok.com",
+    "threads.net", "threads.com", "linkedin.com", "pinterest.com",
+    "snapchat.com", "telegram.me", "t.me",
+)
+
+
+def _decode_text_blob(content: str) -> str:
+    """Make escaped HTML/JSON snippets searchable without changing meaning."""
+    if not content:
+        return ""
+    text = html.unescape(str(content))
+    text = text.replace("\\/", "/").replace("\\n", "\n").replace("\\t", " ")
+    text = text.replace("\\u0026", "&").replace("\\u003d", "=").replace("\\u002f", "/")
+    text = text.replace("\\u002B", "+").replace("\\u003A", ":")
+    return text
+
+
+def _normalize_phone_candidate(value: str) -> str | None:
+    digits = re.sub(r"\D", "", value or "")
+    if digits.startswith("00"):
+        digits = digits[2:]
+    if digits.startswith("0") and len(digits) == 11:
+        digits = digits[1:]
+    if digits.startswith("91") and len(digits) == 12 and digits[2] in "6789":
+        return "+91" + digits[2:]
+    if len(digits) == 10 and digits[0] in "6789":
+        return digits
+    if 8 <= len(digits) <= 15 and value.strip().startswith("+"):
+        return "+" + digits
+    return None
+
+
+def _find_labeled_phone(text: str, label_regex: str) -> str | None:
+    pattern = rf"(?i)(?:{label_regex})\s*(?:us|now)?\s*(?:[:=\-–—]|\s)\s*(\+?[\d][\d\s().\-+]{{7,24}}\d)"
+    for match in re.finditer(pattern, text):
+        phone = _normalize_phone_candidate(match.group(1))
+        if phone:
+            return phone
+    return None
+
+
+def _find_plain_phone(text: str, allow_unlabeled: bool = False) -> str | None:
+    phone = _find_labeled_phone(
+        text,
+        r"contact|call|phone|mobile|mob|tel|telephone|ph|enquir(?:y|ies)|order|booking",
+    )
+    if phone:
+        return phone
+    if allow_unlabeled:
+        for match in re.finditer(r"(?<!\d)(?:\+?91[\s\-]?)?[6-9]\d{9}(?!\d)", text):
+            phone = _normalize_phone_candidate(match.group(0))
+            if phone:
+                return phone
+    return None
+
+
+def _unwrap_redirect_url(raw_url: str) -> str:
+    raw_url = _decode_text_blob(raw_url).strip()
+    parsed = urlparse(raw_url)
+    host = parsed.netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if host in ("l.instagram.com", "l.facebook.com", "lm.facebook.com", "l.messenger.com"):
+        qs = parse_qs(parsed.query)
+        for key in ("u", "url"):
+            if qs.get(key):
+                return unquote(qs[key][0])
+    return raw_url
+
+
+def _normalize_url_candidate(raw_url: str, strip_query: bool = True) -> str | None:
+    if not raw_url:
+        return None
+    url = _unwrap_redirect_url(raw_url)
+    url = html.unescape(url).strip().strip("\"'<>[]()")
+    url = re.sub(r"[),.;:]+$", "", url)
+    if not url or url.startswith(("mailto:", "tel:")):
+        return None
+    if url.startswith("//"):
+        url = "https:" + url
+    if url.lower().startswith("www."):
+        url = "https://" + url
+    if not re.match(r"^https?://", url, re.IGNORECASE):
+        url = "https://" + url
+    parsed = urlparse(url)
+    if not parsed.netloc or "." not in parsed.netloc:
+        return None
+    if any(parsed.path.lower().endswith(ext) for ext in STATIC_URL_EXTENSIONS):
+        return None
+    domain = parsed.netloc.lower()
+    if domain.startswith("www."):
+        domain = domain[4:]
+    if any(domain == item or domain.endswith("." + item) for item in NON_WEBSITE_CONTACT_DOMAINS):
+        strip_query = False
+    if strip_query:
+        url = parsed._replace(query="", fragment="").geturl()
+    else:
+        url = parsed._replace(fragment="").geturl()
+    return url.rstrip("/")
+
+
+def _url_domain(url: str) -> str:
+    host = urlparse(url).netloc.lower()
+    return host[4:] if host.startswith("www.") else host
+
+
+def _domain_matches(domain: str, blocked: tuple[str, ...]) -> bool:
+    return any(domain == item or domain.endswith("." + item) for item in blocked)
+
+
+def _is_profile_owned_url(url: str, allow_social: bool = True) -> bool:
+    normalized = _normalize_url_candidate(url)
+    if not normalized:
+        return False
+    domain = _url_domain(normalized)
+    if _domain_matches(domain, PLATFORM_INFRA_DOMAINS):
+        return False
+    if not allow_social and _domain_matches(domain, SOCIAL_PROFILE_DOMAINS + NON_WEBSITE_CONTACT_DOMAINS):
+        return False
+    return True
+
+
+def _is_primary_website_url(url: str) -> bool:
+    normalized = _normalize_url_candidate(url)
+    if not normalized:
+        return False
+    domain = _url_domain(normalized)
+    blocked = PLATFORM_INFRA_DOMAINS + NON_WEBSITE_CONTACT_DOMAINS + SOCIAL_PROFILE_DOMAINS
+    return not _domain_matches(domain, blocked)
+
+
+def _dedupe_urls(urls: list[str], allow_social: bool = True) -> list[str]:
+    seen = set()
+    clean_urls = []
+    for raw in urls:
+        url = _normalize_url_candidate(raw)
+        if not url or not _is_profile_owned_url(url, allow_social=allow_social):
+            continue
+        key = url.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        clean_urls.append(url)
+    return clean_urls
+
+
+def extract_urls_from_text(text: str) -> list[str]:
+    """Extract visible URLs from bio/about text, including bare www domains."""
+    if not text:
+        return []
+    text = _decode_text_blob(text)
+    matches = [
+        match.group(0)
+        for match in re.finditer(r"(?i)\b(?:https?://|www\.)[^\s\"'<>]+", text)
+    ]
+    matches.extend(
+        match.group(0)
+        for match in re.finditer(
+            r"(?i)(?<!@)\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+            r"(?:com|in|co|net|org|store|shop|boutique|fashion|io|ai|app)"
+            r"(?:/[^\s\"'<>]*)?",
+            text,
+        )
+    )
+    return _dedupe_urls(matches, allow_social=True)
+
+
+def _extract_json_string_values(content: str, key: str) -> list[str]:
+    values = []
+    patterns = [
+        rf'"{re.escape(key)}"\s*:\s*"((?:[^"\\]|\\.)*?)"',
+        rf'\\"{re.escape(key)}\\"\s*:\s*\\"((?:[^"\\]|\\.)*?)\\"',
+    ]
+    for pattern in patterns:
+        for match in re.finditer(pattern, content):
+            value = _decode_text_blob(match.group(1)).strip()
+            if value and value.lower() not in ("null", "none"):
+                values.append(value)
+    return values
+
+
+def _extract_instagram_bio_links(content: str) -> list[str]:
+    links = []
+    for key in ("external_url", "external_lynx_url"):
+        links.extend(_extract_json_string_values(content, key))
+
+    # Newer Instagram embeds multi-link data under bio_links. Keep the scan
+    # close to that key so unrelated JSON urls do not leak into lead data.
+    for marker in ('"bio_links"', '\\"bio_links\\"'):
+        start = 0
+        while True:
+            idx = content.find(marker, start)
+            if idx == -1:
+                break
+            snippet = content[idx: idx + 6000]
+            for key in ("url", "lynx_url"):
+                links.extend(_extract_json_string_values(snippet, key))
+            start = idx + len(marker)
+
+    return _dedupe_urls(links, allow_social=True)
+
+
+def _pick_primary_website(urls: list[str]) -> str:
+    for url in _dedupe_urls(urls, allow_social=True):
+        if _is_primary_website_url(url):
+            return url
+    return ""
+
+
 def extract_contact_info(content: str) -> dict:
-    """Pull email, phone, and WhatsApp from raw page HTML."""
+    """Pull email, phone, and WhatsApp from raw page HTML or bio text."""
     info = {"email": None, "phone": None, "whatsapp": None}
+    searchable = _decode_text_blob(content)
 
     # Email — prefer explicit mailto: links, fall back to plain email regex
     try:
-        mailto = re.search(r'mailto:([^"\'\s<>]+@[^"\'\s<>]+)', content, re.IGNORECASE)
+        mailto = re.search(r'mailto:([^"\'\s<>]+@[^"\'\s<>]+)', searchable, re.IGNORECASE)
         if mailto:
             info["email"] = mailto.group(1).strip()
         else:
@@ -89,7 +317,7 @@ def extract_contact_info(content: str) -> dict:
                 "@fbcdn.net", "@cdninstagram", ".png", ".jpg", ".gif", "@sentry",
                 "support@fb", "help@fb",
             )
-            for candidate in re.findall(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}', content):
+            for candidate in re.findall(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}', searchable):
                 if not any(s in candidate.lower() for s in skip_email_substrings):
                     info["email"] = candidate
                     break
@@ -98,21 +326,32 @@ def extract_contact_info(content: str) -> dict:
 
     # Phone — tel: hrefs are most reliable
     try:
-        tel = re.search(r'tel:([+\d][\d\s()\-+]{6,20})', content)
+        tel = re.search(r'tel:([+\d][\d\s()\-+]{6,24})', searchable)
         if tel:
-            info["phone"] = re.sub(r'\s+', ' ', tel.group(1)).strip()
+            info["phone"] = _normalize_phone_candidate(tel.group(1)) or re.sub(r'\s+', ' ', tel.group(1)).strip()
     except Exception:
         pass
 
     # WhatsApp — wa.me or api.whatsapp.com/send?phone=
     try:
-        wa = re.search(r'wa\.me/(\+?\d{6,15})', content)
+        wa = re.search(r'wa\.me/(\+?\d{6,15})', searchable)
         if not wa:
-            wa = re.search(r'api\.whatsapp\.com/send\?phone=(\+?\d{6,15})', content)
+            wa = re.search(r'(?:api\.)?whatsapp\.com/send\?phone=(\+?\d{6,15})', searchable)
         if wa:
-            info["whatsapp"] = wa.group(1).strip()
+            info["whatsapp"] = _normalize_phone_candidate(wa.group(1)) or wa.group(1).strip()
+        else:
+            info["whatsapp"] = _find_labeled_phone(searchable, r"whats\s*app|whatsapp|wa")
     except Exception:
         pass
+
+    if not info["phone"]:
+        # Full HTML contains many unrelated numeric ids, so only allow completely
+        # unlabeled numbers for short bio/about snippets. Labeled numbers are safe
+        # in both page JSON and plain bio text.
+        info["phone"] = _find_plain_phone(searchable, allow_unlabeled=len(searchable) < 5000)
+
+    if info["whatsapp"] and not info["phone"]:
+        info["phone"] = info["whatsapp"]
 
     return info
 
@@ -369,21 +608,46 @@ def extract_facebook_page_details_sync(page, page_url: str) -> dict:
         except Exception:
             pass
 
-        # Bio / about
+        # Bio / about — prefer FB's embedded JSON (more accurate than DOM scrape)
         bio = ""
-        for sel in [
-            '[data-testid="page-about-section"]',
-            'div[data-pagelet*="About"]',
-            'div[class*="about"]',
+        content_for_bio = ""
+        try:
+            content_for_bio = page.content()
+        except Exception:
+            pass
+        # 1) JSON fields commonly used on FB pages
+        for pattern in [
+            r'"page_about_text"\s*:\s*\{\s*"text"\s*:\s*"((?:[^"\\]|\\.)*?)"',
+            r'"about"\s*:\s*\{\s*"text"\s*:\s*"((?:[^"\\]|\\.)*?)"',
+            r'"best_description"\s*:\s*\{\s*"text"\s*:\s*"((?:[^"\\]|\\.)*?)"',
+            r'"page_description"\s*:\s*"((?:[^"\\]|\\.)*?)"',
+            r'"description"\s*:\s*"((?:[^"\\]|\\.)*?)"',
         ]:
             try:
-                el = page.query_selector(sel)
-                if el:
-                    bio = el.inner_text().strip()[:500]
-                    if bio:
+                m = re.search(pattern, content_for_bio)
+                if m:
+                    candidate = _decode_js_string(m.group(1)).strip()
+                    if candidate and len(candidate) > 5:
+                        bio = candidate
                         break
             except Exception:
                 pass
+        # 2) DOM about sections
+        if not bio:
+            for sel in [
+                '[data-testid="page-about-section"]',
+                'div[data-pagelet*="About"]',
+                'div[class*="about"]',
+            ]:
+                try:
+                    el = page.query_selector(sel)
+                    if el:
+                        bio = el.inner_text().strip()[:500]
+                        if bio:
+                            break
+                except Exception:
+                    pass
+        # 3) Final fallback: meta description
         if not bio:
             try:
                 meta = page.query_selector('meta[name="description"]')
@@ -392,29 +656,62 @@ def extract_facebook_page_details_sync(page, page_url: str) -> dict:
             except Exception:
                 pass
 
-        # External website — look for the brand's own domain, not FB assets
-        website = ""
+        # Category (e.g., "Clothing brand", "Local Business")
+        category = ""
         try:
             content = page.content()
-            urls = re.findall(r'href="(https?://[^"]+)"', content)
-            skip_domains = (
-                "facebook.com", "fbcdn.net", "fb.com", "fb.me",
-                "instagram.com", "twitter.com", "x.com",
-                "wa.me", "whatsapp.com", "youtube.com", "tiktok.com",
-                "google.com", "apple.com", "linktr.ee", "bit.ly",
-                "amazon.com", "flipkart.com", "snapdeal.com",
-            )
-            skip_extensions = (".ico", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".css", ".js", ".woff")
-            for url in urls:
-                url_clean = url.split("?")[0].rstrip("/")
-                if any(d in url_clean for d in skip_domains):
-                    continue
-                if any(url_clean.endswith(ext) for ext in skip_extensions):
-                    continue
-                # Must look like a real domain (has a dot, reasonable TLD)
-                if re.search(r'\.[a-z]{2,6}(/|$)', url_clean, re.IGNORECASE):
-                    website = url_clean
-                    break
+            for pattern in [
+                r'"category_name"\s*:\s*"((?:[^"\\]|\\.)*?)"',
+                r'"category"\s*:\s*"((?:[^"\\]|\\.)*?)"',
+                r'"page_category"\s*:\s*"((?:[^"\\]|\\.)*?)"',
+            ]:
+                m = re.search(pattern, content)
+                if m and m.group(1) and m.group(1).lower() not in ("none", "null"):
+                    category = _decode_js_string(m.group(1)).strip()
+                    if category:
+                        break
+        except Exception:
+            pass
+
+        # External website — JSON `website` field first, then anchor scan
+        website = ""
+        all_links = extract_urls_from_text(bio)
+        try:
+            content = page.content()
+            # 1) JSON website field on FB pages
+            for pattern in [
+                r'"website"\s*:\s*"(https?://(?:[^"\\]|\\.)*?)"',
+                r'"website_url"\s*:\s*"(https?://(?:[^"\\]|\\.)*?)"',
+            ]:
+                m = re.search(pattern, content)
+                if m:
+                    all_links.append(_decode_js_string(m.group(1)).strip())
+
+            # 2) FB's l.facebook.com redirect wrapper for outbound links
+            for raw_url in re.findall(r'href="(https?://l\.facebook\.com/[^"]+)"', content):
+                all_links.append(raw_url)
+
+            # 3) Generic anchor scan
+            if not _pick_primary_website(all_links):
+                urls = re.findall(r'href="(https?://[^"]+)"', content)
+                for url in urls:
+                    normalized = _normalize_url_candidate(url)
+                    if normalized and _is_primary_website_url(normalized):
+                        all_links.append(normalized)
+                        break
+        except Exception:
+            pass
+
+        all_links = _dedupe_urls(all_links, allow_social=True)
+        website = _pick_primary_website(all_links)
+
+        # Verified badge?
+        is_verified = False
+        try:
+            content = page.content()
+            m = re.search(r'"is_verified"\s*:\s*(true|false)', content)
+            if m:
+                is_verified = m.group(1) == "true"
         except Exception:
             pass
 
@@ -446,7 +743,7 @@ def extract_facebook_page_details_sync(page, page_url: str) -> dict:
             "khadi": "khadi", "fusion": "fusion wear", "western": "indo-western",
             "shirt": "shirts", "printed": "printed wear", "denim": "denim",
         }
-        combined = bio.lower()
+        combined = (bio + " " + (category or "")).lower()
         niches = list({v for k, v in niche_map.items() if k in combined}) or ["fashion"]
 
         # Contact info — first scrape from main page content,
@@ -456,6 +753,11 @@ def extract_facebook_page_details_sync(page, page_url: str) -> dict:
         except Exception:
             main_content = ""
         contact = extract_contact_info(main_content)
+        if bio:
+            bio_contact = extract_contact_info(bio)
+            for k, v in bio_contact.items():
+                if v and not contact.get(k):
+                    contact[k] = v
         try:
             contact_url = page_url.rstrip("/") + "/about_contact_and_basic_info"
             page.goto(contact_url, wait_until="domcontentloaded", timeout=15_000)
@@ -470,14 +772,25 @@ def extract_facebook_page_details_sync(page, page_url: str) -> dict:
         handle = "@" + page_url.rstrip("/").split("/")[-1]
         seed = (name[:2].upper() or "FB")
 
+        # Normalize website URL
+        if website:
+            website = website.strip().rstrip("/")
+            if website and not website.startswith(("http://", "https://")):
+                website = "https://" + website
+
         return {
             "brandName": name or handle,
             "handle": handle,
             "platform": "facebook",
             "avatar": f"https://api.dicebear.com/9.x/initials/svg?seed={seed}&backgroundColor=818cf8&fontColor=ffffff",
-            "bio": bio[:400] or "Fashion brand on Facebook",
+            "bio": (bio[:500] or "Fashion brand on Facebook"),
+            "category": category or "",
             "followerCount": follower_count,
+            "followingCount": 0,
+            "postCount": 0,
+            "isVerified": is_verified,
             "website": website or None,
+            "bioLinks": all_links,
             "email": contact["email"],
             "phone": contact["phone"],
             "whatsapp": contact["whatsapp"],
@@ -737,8 +1050,47 @@ def search_instagram_via_duckduckgo(page, search_term: str, max_results: int, ms
     return results
 
 
+def _decode_js_string(s: str) -> str:
+    """Decode escape sequences from JSON strings embedded in <script> tags."""
+    if not s:
+        return ""
+    try:
+        # Handles é, \n, \", \\/ etc.
+        return s.encode("utf-8").decode("unicode_escape", errors="ignore").replace("\\/", "/")
+    except Exception:
+        try:
+            return s.replace("\\/", "/").replace('\\"', '"').replace("\\n", "\n")
+        except Exception:
+            return s
+
+
+def _strip_ig_meta_prefix(desc: str) -> str:
+    """
+    Instagram's meta description looks like:
+      "3,256 Followers, 4 Following, 186 Posts - HEZAK (@hezak_official) on Instagram: \"actual bio here\""
+    This pulls out just the bio between the quotes after "on Instagram:".
+    """
+    if not desc:
+        return ""
+    # The quote character can be straight " or curly “ ”
+    m = re.search(r'on Instagram[^:]*:\s*[\"“”](.*?)[\"“”]\s*$', desc, re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    # Fallback: strip the "X Followers, Y Following, Z Posts - Name (@handle) on Instagram:" prefix
+    m = re.search(r'on Instagram[^:]*:\s*(.*)$', desc, re.DOTALL)
+    if m:
+        return m.group(1).strip().strip('"').strip("“").strip("”")
+    return desc.strip()
+
+
 def extract_instagram_profile_sync(page, profile_url: str) -> dict:
-    """Extracts profile data from a public Instagram page."""
+    """
+    Extracts profile data from a public Instagram page.
+
+    Instagram embeds the real profile data as JSON in <script> tags
+    (biography, external_url, category_name, edge_followed_by, etc.).
+    We parse those first — they're far more reliable than meta tags.
+    """
     try:
         print(f"[scraper] IG visiting: {profile_url}", flush=True)
         page.goto(profile_url, wait_until="domcontentloaded", timeout=25_000)
@@ -750,67 +1102,273 @@ def extract_instagram_profile_sync(page, profile_url: str) -> dict:
         username = profile_url.rstrip("/").split("/")[-1]
         handle = f"@{username}"
 
-        # Brand name from page title: "Brand Name (@handle) • Instagram photos and videos"
-        name = ""
-        try:
-            t = page.title()
-            m = re.match(r'^(.*?)\s*\(@', t)
-            if m:
-                name = m.group(1).strip()
-            if not name:
-                name = t.replace("• Instagram photos and videos", "").strip()
-        except Exception:
-            pass
-
         content = page.content()
 
-        # Bio + follower count from meta description: "X Followers, Y Following, Z Posts — bio"
-        bio = ""
-        follower_count = 0
+        # ── Brand name ─────────────────────────────────────────────────
+        name = ""
+        # Prefer full_name from embedded JSON
         try:
-            meta = page.query_selector('meta[name="description"]')
-            if meta:
-                desc = meta.get_attribute("content") or ""
-                bio = desc
-                m = re.search(r'([\d,.]+[KMk]?)\s*Followers', desc, re.IGNORECASE)
+            m = re.search(r'"full_name":"((?:[^"\\]|\\.)*?)"', content)
+            if m:
+                name = _decode_js_string(m.group(1)).strip()
+        except Exception:
+            pass
+        # Fallback: og:title or page title
+        if not name:
+            try:
+                og = page.query_selector('meta[property="og:title"]')
+                if og:
+                    raw = (og.get_attribute("content") or "").strip()
+                    # "HEZAK - MODEST & ETHNIC WEAR (@hezak_official) • Instagram photos..."
+                    mm = re.match(r'^(.*?)\s*\(@', raw)
+                    name = (mm.group(1) if mm else raw).strip()
+            except Exception:
+                pass
+        if not name:
+            try:
+                t = page.title()
+                mm = re.match(r'^(.*?)\s*\(@', t)
+                if mm:
+                    name = mm.group(1).strip()
+                else:
+                    name = t.replace("• Instagram photos and videos", "").strip()
+            except Exception:
+                pass
+
+        # ── Bio (the REAL one, not the meta prefix) ────────────────────
+        bio = ""
+        # 1) JSON biography field — most accurate
+        try:
+            m = re.search(r'"biography":"((?:[^"\\]|\\.)*?)"', content)
+            if m:
+                bio = _decode_js_string(m.group(1)).strip()
+        except Exception:
+            pass
+        # 2) Strip prefix from meta description
+        if not bio:
+            try:
+                meta = page.query_selector('meta[name="description"]')
+                if meta:
+                    desc = meta.get_attribute("content") or ""
+                    bio = _strip_ig_meta_prefix(desc)
+            except Exception:
+                pass
+        # 3) Final fallback to og:description
+        if not bio:
+            try:
+                og_desc = page.query_selector('meta[property="og:description"]')
+                if og_desc:
+                    desc = og_desc.get_attribute("content") or ""
+                    bio = _strip_ig_meta_prefix(desc)
+            except Exception:
+                pass
+
+        # ── Follower count from JSON (very reliable) ───────────────────
+        follower_count = 0
+        for pattern in [
+            r'"edge_followed_by"\s*:\s*\{\s*"count"\s*:\s*(\d+)',
+            r'"follower_count"\s*:\s*(\d+)',
+            r'"followers"\s*:\s*\{[^}]*"count"\s*:\s*(\d+)',
+        ]:
+            try:
+                m = re.search(pattern, content)
                 if m:
-                    follower_count = parse_follower_count(m.group(1))
+                    follower_count = int(m.group(1))
+                    break
+            except Exception:
+                pass
+        # Fallback to meta description parsing
+        if not follower_count:
+            try:
+                meta = page.query_selector('meta[name="description"]')
+                if meta:
+                    desc = meta.get_attribute("content") or ""
+                    m = re.search(r'([\d,.]+[KMk]?)\s*Followers', desc, re.IGNORECASE)
+                    if m:
+                        follower_count = parse_follower_count(m.group(1))
+            except Exception:
+                pass
+
+        # ── External website (the link Instagram shows in bio) ─────────
+        # Instagram stores links in three different places depending on
+        # whether the profile has 1 link or "X and N more":
+        #   - Single link → "external_url"
+        #   - Multi-link  → "bio_links":[{"url":"..."}]
+        #   - Newer       → "external_lynx_url" (wrapped redirect)
+        website = ""
+        all_links = extract_urls_from_text(bio)
+        all_links.extend(_extract_instagram_bio_links(content))
+
+        # 1) JSON external_url field — what Instagram actually shows
+        try:
+            m = re.search(r'"external_url":"((?:[^"\\]|\\.)*?)"', content)
+            if m and m.group(1):
+                all_links.append(_decode_js_string(m.group(1)).strip())
         except Exception:
             pass
 
-        # External website from bio area
-        website = ""
+        # 2) bio_links array (multi-link profiles like the "+ 1 more" case)
         try:
-            urls = re.findall(r'href="(https?://[^"]+)"', content)
-            skip = ("instagram.com", "facebook.com", "fbcdn.net", "cdninstagram.com",
-                    "wa.me", "linktr.ee", "youtube.com", "twitter.com", "x.com")
-            for url in urls:
-                clean = url.split("?")[0]
-                if any(s in clean for s in skip):
-                    continue
-                if any(clean.endswith(ext) for ext in (".ico", ".png", ".jpg", ".css", ".js")):
-                    continue
-                if re.search(r'\.[a-z]{2,6}(/|$)', clean, re.IGNORECASE):
-                    website = clean
+            # Each link is a JSON object — grab url fields one by one
+            for match in re.finditer(
+                r'"url":"((?:[^"\\]|\\.)*?)"\s*,\s*"link_type"',
+                content,
+            ):
+                u = _decode_js_string(match.group(1)).strip()
+                if u and u not in all_links:
+                    all_links.append(u)
+        except Exception:
+            pass
+
+        # 3) external_lynx_url (newer wrapped form)
+        if not website:
+            try:
+                m = re.search(r'"external_lynx_url":"((?:[^"\\]|\\.)*?)"', content)
+                if m and m.group(1):
+                    raw_lynx = _decode_js_string(m.group(1))
+                    if "l.instagram.com" in raw_lynx and "u=" in raw_lynx:
+                        qs = parse_qs(urlparse(raw_lynx).query)
+                        u = qs.get("u", [""])[0]
+                        if u:
+                            all_links.append(unquote(u).split("?")[0])
+                    else:
+                        all_links.append(raw_lynx)
+            except Exception:
+                pass
+        # 3) Anchor-tag scan, looking for IG's l.instagram.com redirect wrapper
+        if not website:
+            try:
+                for raw_url in re.findall(r'href="(https?://[^"]+)"', content):
+                    if "l.instagram.com" in raw_url and "u=" in raw_url:
+                        qs = parse_qs(urlparse(raw_url).query)
+                        u = qs.get("u", [""])[0]
+                        if u:
+                            decoded = unquote(u).split("?")[0]
+                            if decoded and "instagram.com" not in decoded:
+                                all_links.append(decoded)
+            except Exception:
+                pass
+        # 4) Last resort: generic anchor scan
+        if not website:
+            try:
+                urls = re.findall(r'href="(https?://[^"]+)"', content)
+                for url in urls:
+                    normalized = _normalize_url_candidate(url)
+                    if normalized and _is_primary_website_url(normalized):
+                        all_links.append(normalized)
+                        break
+            except Exception:
+                pass
+
+        # Normalize, dedupe, and select the first real brand website. Known
+        # platform/support URLs like about.meta.com stay out of Website.
+        if website:
+            all_links.insert(0, website)
+        all_links = _dedupe_urls(all_links, allow_social=True)
+        website = _pick_primary_website(all_links)
+
+        # ── Category (e.g., "Clothing (Brand)") ────────────────────────
+        category = ""
+        for pattern in [
+            r'"category_name":"((?:[^"\\]|\\.)*?)"',
+            r'"category":"((?:[^"\\]|\\.)*?)"',
+            r'"business_category_name":"((?:[^"\\]|\\.)*?)"',
+        ]:
+            try:
+                m = re.search(pattern, content)
+                if m and m.group(1) and m.group(1).lower() not in ("none", "null"):
+                    category = _decode_js_string(m.group(1)).strip()
+                    if category:
+                        break
+            except Exception:
+                pass
+
+        # ── Following & posts count (bonus stats) ──────────────────────
+        following_count = 0
+        post_count = 0
+        try:
+            m = re.search(r'"edge_follow"\s*:\s*\{\s*"count"\s*:\s*(\d+)', content)
+            if m:
+                following_count = int(m.group(1))
+        except Exception:
+            pass
+        try:
+            m = re.search(r'"edge_owner_to_timeline_media"\s*:\s*\{\s*"count"\s*:\s*(\d+)', content)
+            if m:
+                post_count = int(m.group(1))
+        except Exception:
+            pass
+
+        # ── Verified flag ──────────────────────────────────────────────
+        is_verified = False
+        try:
+            m = re.search(r'"is_verified":(true|false)', content)
+            if m:
+                is_verified = m.group(1) == "true"
+        except Exception:
+            pass
+
+        # ── City detection (from bio) ──────────────────────────────────
+        city = ""
+        try:
+            haystack = (bio + " " + (category or "")).lower()
+            for city_name in [
+                "Mumbai", "Delhi", "New Delhi", "Bangalore", "Bengaluru", "Hyderabad",
+                "Chennai", "Kolkata", "Jaipur", "Surat", "Pune", "Ahmedabad",
+                "Lucknow", "Gurugram", "Gurgaon", "Noida", "Chandigarh", "Indore",
+                "Udaipur", "Jodhpur", "Kochi", "Amritsar", "Varanasi",
+            ]:
+                if city_name.lower() in haystack:
+                    city = city_name.replace("Gurgaon", "Gurugram")
                     break
         except Exception:
             pass
 
-        # Niche tags from bio
+        # ── Niche tags from bio + category ─────────────────────────────
         niche_map = {
             "saree": "sarees", "lehenga": "lehengas", "kurta": "kurtas",
             "ethnic": "ethnic wear", "handloom": "handloom",
             "sustainable": "sustainable fashion", "streetwear": "streetwear",
             "bridal": "bridal wear", "kids": "kidswear",
             "silk": "silk", "khadi": "khadi", "shirt": "shirts",
+            "modest": "modest wear", "western": "western wear",
+            "fusion": "fusion wear", "denim": "denim", "bandhani": "bandhani",
+            "block print": "block print", "organic": "organic",
         }
-        combined = bio.lower()
+        combined = (bio + " " + (category or "")).lower()
         niches = list({v for k, v in niche_map.items() if k in combined}) or ["fashion"]
 
-        # Contact info from public IG profile (email/phone buttons + bio text)
+        # ── Contact info (email/phone from JSON or bio text) ───────────
         contact = extract_contact_info(content)
-        # Also scan bio meta description specifically — IG often shows email there
-        if not contact["email"] and bio:
+        # Instagram business profiles expose public_email / contact_phone_number in JSON
+        if not contact["email"]:
+            try:
+                m = re.search(r'"public_email":"((?:[^"\\]|\\.)*?)"', content)
+                if m and m.group(1) and "@" in m.group(1):
+                    contact["email"] = _decode_js_string(m.group(1)).strip()
+            except Exception:
+                pass
+            try:
+                m = re.search(r'"business_email":"((?:[^"\\]|\\.)*?)"', content)
+                if m and m.group(1) and "@" in m.group(1):
+                    contact["email"] = _decode_js_string(m.group(1)).strip()
+            except Exception:
+                pass
+        if not contact["phone"]:
+            try:
+                m = re.search(r'"public_phone_number":"((?:[^"\\]|\\.)*?)"', content)
+                if m and m.group(1):
+                    contact["phone"] = _decode_js_string(m.group(1)).strip()
+            except Exception:
+                pass
+            try:
+                m = re.search(r'"business_phone_number":"((?:[^"\\]|\\.)*?)"', content)
+                if m and m.group(1):
+                    contact["phone"] = _decode_js_string(m.group(1)).strip()
+            except Exception:
+                pass
+        # Bio often has the email/phone in plain text too
+        if bio:
             bio_contact = extract_contact_info(bio)
             for k, v in bio_contact.items():
                 if v and not contact.get(k):
@@ -818,18 +1376,29 @@ def extract_instagram_profile_sync(page, profile_url: str) -> dict:
 
         seed = (name[:2].upper() or "IG")
 
+        # Deduplicate bio_links and put website first
+        bio_links = []
+        for url in ([website] if website else []) + all_links:
+            if url and url not in bio_links:
+                bio_links.append(url)
+
         return {
             "brandName": name or handle,
             "handle": handle,
             "platform": "instagram",
             "avatar": f"https://api.dicebear.com/9.x/initials/svg?seed={seed}&backgroundColor=ec4899&fontColor=ffffff",
-            "bio": bio[:400] or "Indian fashion brand on Instagram",
+            "bio": (bio[:500] or "Indian fashion brand on Instagram"),
+            "category": category or "",
             "followerCount": follower_count,
+            "followingCount": following_count,
+            "postCount": post_count,
+            "isVerified": is_verified,
             "website": website or None,
+            "bioLinks": bio_links,
             "email": contact["email"],
             "phone": contact["phone"],
             "whatsapp": contact["whatsapp"],
-            "city": "India",
+            "city": city or "India",
             "state": "",
             "niches": niches[:4],
             "posts": [],
@@ -1319,28 +1888,22 @@ def extract_linkedin_profile_sync(page, profile_url: str) -> dict:
 
         # External website — for company pages LinkedIn lists the brand site
         website = ""
+        all_links = extract_urls_from_text(bio)
         try:
             urls = re.findall(r'href="(https?://[^"]+)"', content)
-            skip = (
-                "linkedin.com", "licdn.com", "facebook.com", "fbcdn.net",
-                "instagram.com", "wa.me", "youtube.com", "twitter.com", "x.com",
-                "google.com", "apple.com",
-            )
             for url in urls:
-                clean = url.split("?")[0]
-                if any(s in clean for s in skip):
-                    continue
-                if any(clean.endswith(ext) for ext in (".ico", ".png", ".jpg", ".css", ".js", ".woff")):
-                    continue
-                if re.search(r'\.[a-z]{2,6}(/|$)', clean, re.IGNORECASE):
-                    website = clean
+                normalized = _normalize_url_candidate(url)
+                if normalized and _is_primary_website_url(normalized):
+                    all_links.append(normalized)
                     break
         except Exception:
             pass
+        all_links = _dedupe_urls(all_links, allow_social=True)
+        website = _pick_primary_website(all_links)
 
         # Contact info from page content (rare on LinkedIn but possible from bio)
         contact = extract_contact_info(content)
-        if not contact["email"] and bio:
+        if bio:
             bio_contact = extract_contact_info(bio)
             for k, v in bio_contact.items():
                 if v and not contact.get(k):
@@ -1371,6 +1934,7 @@ def extract_linkedin_profile_sync(page, profile_url: str) -> dict:
             "bio": (bio[:400] or ("LinkedIn company page" if is_company else "LinkedIn profile")),
             "followerCount": follower_count,
             "website": website or None,
+            "bioLinks": all_links,
             "email": contact["email"],
             "phone": contact["phone"],
             "whatsapp": contact["whatsapp"],

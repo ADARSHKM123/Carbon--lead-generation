@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { Instagram, Facebook, Linkedin, Mail, CheckCircle2, XCircle, ExternalLink, Save, Eye, EyeOff, AlertCircle, Sparkles, ChevronDown, Loader2, X, MonitorPlay } from 'lucide-react'
 import Header from '../components/layout/Header'
 import { cn } from '../lib/utils'
+import { checkDeepSeekStatus } from '../lib/api'
 
 const AI_PROVIDERS = [
   {
@@ -39,8 +40,22 @@ function AIProviderSelector() {
   })
   const [keys, setKeys] = useState({ anthropic: '', deepseek: '' })
   const [showKeys, setShowKeys] = useState({ anthropic: false, deepseek: false })
+  const [deepSeekStatus, setDeepSeekStatus] = useState(null)
+  const [checkingDeepSeek, setCheckingDeepSeek] = useState(false)
 
   const provider = AI_PROVIDERS.find(p => p.id === activeProvider)
+
+  const handleCheckDeepSeek = async () => {
+    setCheckingDeepSeek(true)
+    setDeepSeekStatus(null)
+    try {
+      setDeepSeekStatus(await checkDeepSeekStatus())
+    } catch (err) {
+      setDeepSeekStatus({ ok: false, error: err?.detail || err?.message || 'DeepSeek check failed' })
+    } finally {
+      setCheckingDeepSeek(false)
+    }
+  }
 
   return (
     <div className="bg-card border border-border rounded-xl overflow-hidden">
@@ -134,6 +149,34 @@ function AIProviderSelector() {
 }
           </pre>
         </div>
+
+        {activeProvider === 'deepseek' && (
+          <div className="flex items-start gap-3 p-3 bg-secondary/60 border border-border rounded-lg">
+            <button
+              onClick={handleCheckDeepSeek}
+              disabled={checkingDeepSeek}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-primary/10 text-primary border border-primary/30 rounded-lg text-xs font-medium hover:bg-primary/20 disabled:opacity-50 transition-colors"
+            >
+              {checkingDeepSeek ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+              Check DeepSeek
+            </button>
+            {deepSeekStatus && (
+              <div className={cn(
+                'flex-1 text-[11px] leading-relaxed',
+                deepSeekStatus.ok ? 'text-emerald-400' : 'text-amber-400'
+              )}>
+                <div className="flex items-center gap-1.5 font-medium">
+                  {deepSeekStatus.ok ? <CheckCircle2 className="w-3.5 h-3.5" /> : <AlertCircle className="w-3.5 h-3.5" />}
+                  {deepSeekStatus.ok ? 'DeepSeek is working' : 'DeepSeek needs attention'}
+                </div>
+                <p className="mt-0.5 text-muted-foreground">
+                  {deepSeekStatus.model || 'deepseek-chat'}
+                  {deepSeekStatus.error ? ` - ${deepSeekStatus.error}` : ''}
+                </p>
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="flex items-start gap-2 p-3 bg-primary/5 border border-primary/20 rounded-lg">
           <Sparkles className="w-3.5 h-3.5 text-primary flex-shrink-0 mt-0.5" />

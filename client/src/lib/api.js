@@ -2,7 +2,7 @@ import axios from 'axios'
 
 const api = axios.create({
   baseURL: '/api',
-  timeout: 30000,
+  timeout: 90000, // long enough for HikerAPI hashtag enrichment (~30 parallel profile fetches)
 })
 
 api.interceptors.response.use(
@@ -23,6 +23,46 @@ export const discoverLeads = async (params) => {
 export const sendCampaign = async (campaignId, leadIds) => {
   const res = await api.post('/send', { campaignId, leadIds })
   return res
+}
+
+export const enrichLead = async ({ brandName, handle, bio, category, website, bioLinks }) => {
+  const res = await api.post('/leads/enrich', { brandName, handle, bio, category, website, bioLinks })
+  return res
+}
+
+export const checkDeepSeekStatus = async () => {
+  const res = await api.get('/ai/deepseek/status')
+  return res
+}
+
+// ─── HikerAPI proxy ──────────────────────────────────────────────
+const HIKER_KEY_STORAGE = 'carbon_hiker_key'
+
+export const getHikerKey = () => localStorage.getItem(HIKER_KEY_STORAGE) || ''
+export const setHikerKey = (key) => localStorage.setItem(HIKER_KEY_STORAGE, key || '')
+export const clearHikerKey = () => localStorage.removeItem(HIKER_KEY_STORAGE)
+
+const withHikerHeader = () => {
+  const key = getHikerKey()
+  return key ? { 'x-hiker-key': key } : {}
+}
+
+export const testHikerKey = async () => {
+  return await api.get('/hiker/test-key', { headers: withHikerHeader() })
+}
+
+export const scrapeHikerUser = async (username) => {
+  return await api.get('/hiker/user', {
+    params: { username },
+    headers: withHikerHeader(),
+  })
+}
+
+export const scrapeHikerHashtag = async (tag, kind = 'recent', limit = 30) => {
+  return await api.get('/hiker/hashtag', {
+    params: { tag, kind, limit },
+    headers: withHikerHeader(),
+  })
 }
 
 export default api

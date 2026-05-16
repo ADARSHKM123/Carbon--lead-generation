@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     meta_access_token: str = ""
     instagram_business_account_id: str = ""
 
+    # HikerAPI (third-party Instagram scraping)
+    hiker_api_key: str = ""
+
     # Active AI provider — change this to switch models
     # Options: "anthropic" | "deepseek"
     ai_provider: Literal["anthropic", "deepseek"] = "anthropic"

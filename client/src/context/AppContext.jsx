@@ -1,14 +1,14 @@
 import { createContext, useContext, useState, useCallback } from 'react'
-import { MOCK_LEADS, MOCK_REPLIES } from '../data/mockLeads'
 import { MOCK_CAMPAIGNS, MOCK_TEMPLATES } from '../data/mockCampaigns'
 
 const AppContext = createContext(null)
 
 export function AppProvider({ children }) {
-  const [leads, setLeads] = useState(MOCK_LEADS)
+  // Leads start empty — populated by real discovery runs only
+  const [leads, setLeads] = useState([])
   const [campaigns, setCampaigns] = useState(MOCK_CAMPAIGNS)
   const [templates, setTemplates] = useState(MOCK_TEMPLATES)
-  const [replies, setReplies] = useState(MOCK_REPLIES)
+  const [replies, setReplies] = useState([])
   const [theme, setTheme] = useState('dark')
   const [toasts, setToasts] = useState([])
 
