@@ -1,8 +1,10 @@
 import axios from 'axios'
 
+// In production (Vercel), VITE_API_URL points to the Render backend.
+// In local dev, requests go to /api which Vite proxies to localhost:8000.
 const api = axios.create({
-  baseURL: '/api',
-  timeout: 90000, // long enough for HikerAPI hashtag enrichment (~30 parallel profile fetches)
+  baseURL: import.meta.env.VITE_API_URL ? `${import.meta.env.VITE_API_URL}/api` : '/api',
+  timeout: 90000,
 })
 
 api.interceptors.response.use(
