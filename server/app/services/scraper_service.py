@@ -23,8 +23,17 @@ import random
 import re
 import threading
 from urllib.parse import quote_plus, unquote, urlparse, parse_qs
-from playwright.sync_api import sync_playwright
-from app.services.session_service import session_path, session_exists
+try:
+    from playwright.sync_api import sync_playwright
+    PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    PLAYWRIGHT_AVAILABLE = False
+
+try:
+    from app.services.session_service import session_path, session_exists
+except ImportError:
+    session_path = lambda p: ""
+    session_exists = lambda p: False
 
 
 # Real Chrome 131 on Windows 10 UA — matches Playwright's bundled Chromium version

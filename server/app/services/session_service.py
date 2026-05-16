@@ -11,7 +11,11 @@ import queue
 import threading
 import time
 from pathlib import Path
-from playwright.sync_api import sync_playwright
+try:
+    from playwright.sync_api import sync_playwright
+    PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    PLAYWRIGHT_AVAILABLE = False
 
 SESSIONS_DIR = Path(__file__).parent.parent.parent / "sessions"
 SESSIONS_DIR.mkdir(exist_ok=True)
